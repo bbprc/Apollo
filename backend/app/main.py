@@ -19,7 +19,7 @@ from app import db
 from app.config import get_settings
 from app.data.registry import get_registry
 from app.llm import client as llm_client
-from app.routers import advice, chat, draft, league, players
+from app.routers import advice, chat, draft, events, league, players, sleeper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +67,8 @@ app.add_middleware(
 
 app.include_router(league.router)
 app.include_router(draft.router)
+app.include_router(events.router)
+app.include_router(sleeper.router)
 app.include_router(players.router)
 app.include_router(advice.router)
 app.include_router(chat.router)

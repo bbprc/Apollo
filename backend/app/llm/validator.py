@@ -61,6 +61,7 @@ def validate(
     league: LeagueSettings,
     user_content: str,
     registry: PlayerRegistry | None = None,
+    depth: str = "deep",
 ) -> dict[str, Any]:
     """Run the audit, retrying once if the answer strays outside the registry.
 
@@ -70,7 +71,7 @@ def validate(
     registry = registry or get_registry()
     system = prompts.validator_system(league)
 
-    result = llm_client.parse(system, user_content, Verdict)
+    result = llm_client.parse(system, user_content, Verdict, depth=depth)
     if not result.ok:
         return result.to_dict()
 
@@ -81,7 +82,7 @@ def validate(
         log.warning("validator named unknown players %s; retrying once", unknown)
         correction = prompts.CORRECTION_NOTICE.format(names=", ".join(unknown))
         retry = llm_client.parse(
-            system, f"{user_content}\n\n{correction}", Verdict
+            system, f"{user_content}\n\n{correction}", Verdict, depth=depth
         )
         if retry.ok:
             verdict = retry.parsed
@@ -117,23 +118,27 @@ def validate(
 
 
 def validate_wait_vs_take(league, recommendation, score, alternatives,
-                          registry: PlayerRegistry | None = None) -> dict[str, Any]:
+                          registry: PlayerRegistry | None = None,
+                          depth: str = "deep") -> dict[str, Any]:
     if not llm_client.is_enabled():
         return {"status": "unavailable", "detail": "ANTHROPIC_API_KEY is not set"}
     return validate(
         league,
         prompts.wait_vs_take_packet(recommendation, score, alternatives),
         registry,
+        depth=depth,
     )
 
 
 def validate_board(league, scores, current_pick: int, roster: dict[str, int],
                    needs: dict[str, int],
-                   registry: PlayerRegistry | None = None) -> dict[str, Any]:
+                   registry: PlayerRegistry | None = None,
+                   depth: str = "deep") -> dict[str, Any]:
     if not llm_client.is_enabled():
         return {"status": "unavailable", "detail": "ANTHROPIC_API_KEY is not set"}
     return validate(
         league,
         prompts.board_packet(scores, current_pick, roster, needs),
         registry,
+        depth=depth,
     )

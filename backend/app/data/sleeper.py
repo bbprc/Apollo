@@ -123,6 +123,70 @@ def league_settings_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def user_by_username(username: str) -> dict[str, Any] | None:
+    """Resolve a Sleeper username to the account behind it.
+
+    Nobody knows their own 19-digit Sleeper user id, but everybody knows their
+    username, and the slot resolution downstream needs the id.
+    """
+    try:
+        payload = _get(f"/user/{username.strip()}")
+    except SleeperError:
+        return None
+    return payload if isinstance(payload, dict) and payload.get("user_id") else None
+
+
+def drafts_for_user(user_id: str, season: int) -> list[dict[str, Any]]:
+    """Every draft this account is in for a season. Mock drafts are not listed."""
+    payload = _get(f"/user/{user_id}/drafts/nfl/{season}")
+    return payload if isinstance(payload, list) else []
+
+
+def leagues_for_user(user_id: str, season: int) -> list[dict[str, Any]]:
+    payload = _get(f"/user/{user_id}/leagues/nfl/{season}")
+    return payload if isinstance(payload, list) else []
+
+
+def team_names_for_draft(draft_id: str) -> dict[int, str]:
+    """Draft slot -> manager display name.
+
+    ``draft_order`` maps user ids to slots, and the league's user list maps
+    those ids to names. Slots with no human behind them (the CPU teams in a
+    mock) are simply absent, and the caller falls back to "Team N".
+    """
+
+    def _load() -> dict[str, str]:
+        draft = get_draft(draft_id)
+        order = draft.get("draft_order") or {}
+        if not order:
+            return {}
+        league_id = (draft.get("metadata") or {}).get("league_id") or draft.get("league_id")
+        if not league_id:
+            return {}
+        try:
+            users = _get(f"/league/{league_id}/users") or []
+        except SleeperError:
+            log.warning("could not read league users for draft %s", draft_id)
+            return {}
+
+        names = {
+            str(u.get("user_id")): (
+                (u.get("metadata") or {}).get("team_name") or u.get("display_name")
+            )
+            for u in users
+            if isinstance(u, dict) and u.get("user_id")
+        }
+        # Keys are stringified so the payload survives the JSON cache round trip.
+        return {
+            str(slot): names[str(user_id)]
+            for user_id, slot in order.items()
+            if names.get(str(user_id))
+        }
+
+    raw = cached(cache_key("sleeper_team_names", draft_id), _load, ttl_hours=6)
+    return {int(slot): name for slot, name in (raw or {}).items()}
+
+
 def my_slot_from_draft(draft: dict[str, Any], user_id: str | None) -> int | None:
     """Find which draft slot belongs to a Sleeper user id."""
     if not user_id:

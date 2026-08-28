@@ -121,6 +121,30 @@ def load_weekly_stats(seasons: list[int]) -> list[dict[str, Any]]:
     return cached(cache_key("weekly_stats", sorted(seasons)), _load, ttl_hours=24)
 
 
+def load_expected_points(seasons: list[int]) -> list[dict[str, Any]]:
+    """Weekly expected fantasy points, from ffverse's opportunity model.
+
+    This is the one genuinely player-specific measure of value in the app.
+    ``projected_points`` elsewhere is read off a rank-to-points curve, so it
+    only ever restates the consensus; ``total_fantasy_points_exp`` is computed
+    from what actually happened on the field - down, distance, field position -
+    which is what lets the board disagree with the market.
+    """
+
+    def _load() -> list[dict[str, Any]]:
+        nfl = _nfl()
+        rows: list[dict[str, Any]] = []
+        for season in seasons:
+            try:
+                frame = nfl.load_ff_opportunity(seasons=[season], stat_type="weekly")
+                rows.extend(_records(frame))
+            except Exception as exc:  # noqa: BLE001 - a missing season is not fatal
+                log.warning("expected points %s unavailable (%s)", season, exc)
+        return rows
+
+    return cached(cache_key("ff_opportunity", sorted(seasons)), _load, ttl_hours=24)
+
+
 def load_injuries(seasons: list[int]) -> list[dict[str, Any]]:
     """Weekly injury reports, available from 2009."""
 

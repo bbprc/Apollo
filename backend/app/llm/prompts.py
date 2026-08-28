@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from app.models.league import LeagueSettings
+from app.scoring import draft_strategy
 
 METHODOLOGY = """\
 You are the second opinion in a fantasy football draft assistant called Apollo.
@@ -89,6 +90,8 @@ def validator_system(league: LeagueSettings) -> str:
     return (
         METHODOLOGY
         + "\n\n"
+        + draft_strategy.prompt_block(league)
+        + "\n\n"
         + _league_block(league)
         + "\n\nReturn a verdict on the recommendation you are shown. Set `agrees`"
         " to false only if you can point to something specific in the evidence"
@@ -101,6 +104,8 @@ def validator_system(league: LeagueSettings) -> str:
 def chat_system(league: LeagueSettings) -> str:
     return (
         METHODOLOGY
+        + "\n\n"
+        + draft_strategy.prompt_block(league)
         + "\n\n"
         + _league_block(league)
         + "\n\nYou are answering the user's questions about their draft. Ground"

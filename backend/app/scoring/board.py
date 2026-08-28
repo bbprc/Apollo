@@ -18,7 +18,8 @@ from app.data.registry import PlayerRegistry, get_registry
 from app.models.league import LeagueSettings
 from app.models.player import Player, PlayerConsensus, PlayerScore
 from app.scoring import projections as projections_mod
-from app.scoring.confidence import ConfidenceInput, ConfidenceScorer
+from app.scoring.confidence import ConfidenceInput, ConfidenceScorer, zscore
+from app.scoring.expected_points import get_expected_points
 from app.scoring.injury import InjuryModel, build_injury_model
 from app.scoring.sos import StrengthOfSchedule
 from app.scoring.target_share import OpportunityModel, build_opportunity_model
@@ -176,6 +177,7 @@ class PlayerPool:
             )
 
         scorer = ConfidenceScorer((c for _p, c in candidates), self.settings.weights)
+        expected = get_expected_points()
 
         scores: list[PlayerScore] = []
         for player, item in candidates:
@@ -185,6 +187,7 @@ class PlayerPool:
             projection = self.projections.get(player.player_id)
             notes = [
                 note for note in (
+                    expected.detail(player.gsis_id, player.position),
                     signals.get("injury_detail"),
                     signals.get("opportunity_detail"),
                     f"usage {signals['usage_trend']}" if signals.get("usage_trend") else None,
@@ -205,13 +208,42 @@ class PlayerPool:
                     sos_playoffs=signals.get("sos_playoffs"),
                     injury_risk=signals.get("injury_risk"),
                     opportunity_share=signals.get("opportunity_share"),
+                    expected_ppg=expected.expected_ppg(player.gsis_id),
+                    expected_above_replacement=expected.above_replacement(
+                        player.gsis_id,
+                        player.position,
+                        self.replacement_ranks.get(player.position),
+                    ),
+                    usage_rank=expected.usage_rank(player.gsis_id),
+                    edge_ppg=expected.edge_ppg(
+                        player.gsis_id,
+                        projection.projected_points if projection else None,
+                    ),
                     notes=notes,
                 )
             )
 
+        # Standardise the usage edge within each position before anyone ranks
+        # on it: raw points per game are not comparable across positions.
+        by_position_edges: dict[str, list[float]] = {}
+        for score in scores:
+            if score.edge_ppg is not None:
+                by_position_edges.setdefault(score.player.position, []).append(
+                    score.edge_ppg
+                )
+        standardisers = {
+            position: zscore(values) for position, values in by_position_edges.items()
+        }
+        for score in scores:
+            if score.edge_ppg is not None:
+                standardise = standardisers.get(score.player.position)
+                if standardise:
+                    score.edge_z = round(standardise(score.edge_ppg), 3)
+
         # Rank by value over replacement, not by confidence: confidence says how
         # sure we are, VORP says how much it is worth being right.
         scores.sort(key=lambda s: (s.vorp if s.vorp is not None else -1e9), reverse=True)
+        assign_tiers(scores)
         return scores[:limit] if limit else scores
 
 
@@ -244,3 +276,42 @@ def get_pool(league: LeagueSettings, refresh: bool = False) -> PlayerPool:
 
 def clear_pools() -> None:
     _POOL_CACHE.clear()
+
+
+def assign_tiers(scores: list[PlayerScore]) -> None:
+    """Group each position into tiers, in place.
+
+    A tier break is a gap in the value curve that is large relative to the
+    typical gap at that position - the "cliff" drafters wait for. Positions
+    differ enormously in shape (quarterback is flat, running back is steep), so
+    the threshold is derived per position rather than fixed.
+    """
+    by_position: dict[str, list[PlayerScore]] = {}
+    for score in scores:
+        by_position.setdefault(score.player.position, []).append(score)
+
+    for group in by_position.values():
+        ranked = sorted(
+            group, key=lambda s: (s.vorp if s.vorp is not None else -1e9), reverse=True
+        )
+        gaps = [
+            (ranked[i].vorp or 0.0) - (ranked[i + 1].vorp or 0.0)
+            for i in range(len(ranked) - 1)
+        ]
+        if not gaps:
+            for score in ranked:
+                score.tier = 1
+            continue
+
+        mean = sum(gaps) / len(gaps)
+        variance = sum((g - mean) ** 2 for g in gaps) / len(gaps)
+        # One standard deviation above the typical gap, with a floor so a
+        # perfectly smooth curve does not shatter into single-player tiers.
+        threshold = max(mean + variance ** 0.5, 3.0)
+
+        tier = 1
+        ranked[0].tier = tier
+        for index, gap in enumerate(gaps):
+            if gap >= threshold:
+                tier += 1
+            ranked[index + 1].tier = tier

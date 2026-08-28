@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # --- llm ---------------------------------------------------------------
     model: str = "claude-opus-5"
     llm_effort: str = "high"
+    #: Effort for the "quick check" button. The deep button keeps llm_effort.
+    llm_effort_quick: str = "medium"
+    #: Fast Mode runs the same model at up to 2.5x output speed for 2x the token
+    #: price. On a two-minute draft clock that trade is worth making, and it
+    #: costs nothing in quality - it is the same model at the same effort.
+    llm_fast_mode: bool = True
     llm_max_tokens: int = 16000
     llm_timeout_seconds: float = 120.0
 

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import db
+from app.data import sleeper
 from app.data.registry import PlayerRegistry
 from app.engine import draft_state
 from app.models.draft import DraftSession
 from app.models.league import LeagueSettings
 from app.models.responses import PickCreate, SessionCreate, SessionResponse
-from app.routers.deps import registry_dep, resolve_player_id, session_dep
+from app.routers.deps import pool_for, registry_dep, resolve_player_id, session_dep
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/draft", tags=["draft"])
 
@@ -41,7 +46,18 @@ def create_session(payload: SessionCreate) -> SessionResponse:
     if league is None and payload.sleeper_draft_id:
         try:
             league = draft_state.league_from_sleeper(
-                payload.sleeper_draft_id, payload.sleeper_user_id
+                payload.sleeper_draft_id,
+                payload.sleeper_user_id,
+                payload.my_draft_slot,
+            )
+        except draft_state.SlotUnresolved as exc:
+            # 422 rather than 502: the caller can fix this by naming a slot.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": str(exc),
+                    "needs": "my_draft_slot",
+                },
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"Sleeper lookup failed: {exc}")
@@ -67,6 +83,32 @@ def list_sessions() -> dict:
 def get_state(session: DraftSession = Depends(session_dep),
               registry: PlayerRegistry = Depends(registry_dep)) -> dict:
     rosters = session.rosters()
+    pool = pool_for(session)
+
+    def roster_player(player_id: str) -> dict | None:
+        """Name, position and bye for a drafted player.
+
+        Drafted players have left the available board, so the bye week the
+        bye-conflict warning needs has to be read off the pool directly.
+        """
+        player = registry.get(player_id)
+        if player is None:
+            return None
+        return {
+            "player_id": player_id,
+            "name": player.name,
+            "position": player.position,
+            "team": player.team,
+            "bye_week": pool.signals(player_id).get("bye_week"),
+        }
+
+    slot_names: dict[int, str] = {}
+    if session.sleeper_draft_id:
+        try:
+            slot_names = sleeper.team_names_for_draft(session.sleeper_draft_id)
+        except Exception:  # noqa: BLE001 - cosmetic only; never fail the board for it
+            log.debug("team names unavailable for %s", session.sleeper_draft_id)
+
     return {
         "session_id": session.session_id,
         "current_pick": session.current_pick,
@@ -79,11 +121,13 @@ def get_state(session: DraftSession = Depends(session_dep),
         "my_remaining_picks": [
             p for p in session.league.my_picks() if p >= session.current_pick
         ],
+        "slot_names": slot_names,
         "picks": [p.model_dump(mode="json") for p in session.picks],
         "rosters": {
             slot: {
                 "players": [
-                    registry.get(pid).name for pid in roster.player_ids if registry.get(pid)
+                    row for row in (roster_player(pid) for pid in roster.player_ids)
+                    if row is not None
                 ],
                 "positions": roster.positions,
                 "needs": {k: v for k, v in roster.needs(session.league).items() if v > 0},

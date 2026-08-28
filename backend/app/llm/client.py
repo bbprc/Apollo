@@ -81,6 +81,7 @@ def _usage(response) -> dict[str, Any]:
         "output_tokens": getattr(usage, "output_tokens", None),
         "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
         "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
+        "speed": getattr(usage, "speed", None),
     }
 
 
@@ -120,27 +121,88 @@ def _handle(exc: Exception) -> LLMResult:
     return LLMResult(status="error", detail=f"{type(exc).__name__}: {exc}")
 
 
+#: Fast Mode is a research preview on Opus 5; the beta flag is required.
+FAST_MODE_BETA = "fast-mode-2026-02-01"
+
+#: Set once the API tells us this account has no Fast Mode quota. Not every org
+#: has it enabled, and retrying a request we know will 429 costs a full round
+#: trip on the draft clock - exactly the latency this was meant to remove.
+_FAST_MODE_DENIED = False
+
+
+def fast_mode_available() -> bool:
+    settings = get_settings()
+    return (
+        settings.llm_fast_mode
+        and not _FAST_MODE_DENIED
+        and settings.model.startswith("claude-opus-5")
+    )
+
+
+def _speed_kwargs() -> dict[str, Any]:
+    """Fast Mode arguments, when it is switched on and the account has it."""
+    if not fast_mode_available():
+        return {}
+    return {"speed": "fast", "betas": [FAST_MODE_BETA]}
+
+
+def _note_fast_mode_failure(exc: Exception) -> None:
+    """Stop trying after the account tells us it has no quota."""
+    global _FAST_MODE_DENIED
+    message = str(exc)
+    if "fast mode" in message.lower() or "rate_limit" in message.lower():
+        _FAST_MODE_DENIED = True
+        log.warning(
+            "fast mode is not available on this account; using standard speed "
+            "from now on"
+        )
+    else:
+        log.warning("fast mode call failed (%s); using standard speed", exc)
+
+
+def _effort_for(depth: str) -> str:
+    """`quick` trades some depth for the clock; `deep` keeps the full setting."""
+    settings = get_settings()
+    return settings.llm_effort_quick if depth == "quick" else settings.llm_effort
+
+
 def parse(
     system_prompt: str,
     user_content: str,
     schema: Type[BaseModel],
     max_tokens: int | None = None,
+    depth: str = "deep",
 ) -> LLMResult:
-    """Ask for a structured answer validated against ``schema``."""
+    """Ask for a structured answer validated against ``schema``.
+
+    ``depth`` is "quick" or "deep". Both run the same model; quick lowers effort
+    for when the draft clock is short, deep keeps the configured setting.
+    """
     if not is_enabled():
         return LLMResult(status="unavailable", detail="ANTHROPIC_API_KEY is not set")
 
     settings = get_settings()
+    common = dict(
+        model=settings.model,
+        max_tokens=max_tokens or settings.llm_max_tokens,
+        thinking={"type": "adaptive"},
+        output_config={"effort": _effort_for(depth)},
+        system=_cached_system(system_prompt),
+        messages=[{"role": "user", "content": user_content}],
+        output_format=schema,
+    )
+    fast = _speed_kwargs()
     try:
-        response = get_client().messages.parse(
-            model=settings.model,
-            max_tokens=max_tokens or settings.llm_max_tokens,
-            thinking={"type": "adaptive"},
-            output_config={"effort": settings.llm_effort},
-            system=_cached_system(system_prompt),
-            messages=[{"role": "user", "content": user_content}],
-            output_format=schema,
-        )
+        if fast:
+            try:
+                response = get_client().beta.messages.parse(**common, **fast)
+            except Exception as exc:  # noqa: BLE001
+                # Fast Mode has its own rate limit and is a preview. Losing it
+                # must cost latency, never the audit itself.
+                _note_fast_mode_failure(exc)
+                response = get_client().messages.parse(**common)
+        else:
+            response = get_client().messages.parse(**common)
     except Exception as exc:  # noqa: BLE001 - mapped to a status by _handle
         return _handle(exc)
 

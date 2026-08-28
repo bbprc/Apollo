@@ -118,6 +118,32 @@ class PlayerScore(BaseModel):
     injury_risk: float | None = None
     opportunity_share: float | None = None
 
+    #: Positional tier, 1 = best. Tiers break where the value curve drops off,
+    #: which is the thing a drafter is really tracking: "two left before the
+    #: cliff" is more actionable than a rank.
+    tier: int | None = None
+
+    #: Expected fantasy points per game from actual play-by-play opportunity.
+    #: Unlike ``projected_points`` this is specific to the player rather than
+    #: read off a rank curve, so it is the one number here that can disagree
+    #: with the consensus. ``None`` for rookies and anyone short of history.
+    expected_ppg: float | None = None
+    #: His rank at his own position on that measure, 1 = best.
+    usage_rank: int | None = None
+    #: Expected points per game minus the per-game value his draft price
+    #: implies. Positive means the market is discounting his actual usage.
+    #: Measured in points, not ranks, so it means the same thing at any rank.
+    edge_ppg: float | None = None
+    #: Expected points per game above the replacement-level player at his
+    #: position. This is what makes "upside" comparable across positions; raw
+    #: expected_ppg is not, and ranking on it surfaces only quarterbacks.
+    expected_above_replacement: float | None = None
+    #: That edge standardised *within his position*. Raw points are not
+    #: comparable across positions - a quarterback scores about twice a running
+    #: back, so an unadjusted edge ranks quarterbacks and nothing else. Rank on
+    #: this; show ``edge_ppg``.
+    edge_z: float | None = None
+
     notes: list[str] = Field(default_factory=list)
 
     def explain(self) -> str:

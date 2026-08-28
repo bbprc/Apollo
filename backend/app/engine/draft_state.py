@@ -25,6 +25,10 @@ class DraftNotFound(KeyError):
     pass
 
 
+class SlotUnresolved(ValueError):
+    """Sleeper did not say which slot belongs to this user, so the caller must."""
+
+
 # --- lifecycle ------------------------------------------------------------
 
 def create_session(league: LeagueSettings, sleeper_draft_id: str | None = None,
@@ -171,12 +175,21 @@ def sync_from_sleeper(session: DraftSession,
     }
 
 
-def league_from_sleeper(draft_id: str, user_id: str | None = None) -> LeagueSettings:
+def league_from_sleeper(draft_id: str, user_id: str | None = None,
+                        my_draft_slot: int | None = None) -> LeagueSettings:
     """Build league settings from a Sleeper draft, so the user types one id."""
     draft = sleeper.get_draft(draft_id)
     fields = sleeper.league_settings_from_draft(draft)
-    slot = sleeper.my_slot_from_draft(draft, user_id)
+    if my_draft_slot:
+        fields["my_draft_slot"] = my_draft_slot
+    slot = None if my_draft_slot else sleeper.my_slot_from_draft(draft, user_id)
     if slot:
         fields["my_draft_slot"] = slot
-    fields.setdefault("my_draft_slot", 1)
+    elif "my_draft_slot" not in fields:
+        # Deliberately not defaulting. Guessing slot 1 for a drafter sitting at
+        # 12 silently poisons replacement level, availability and every
+        # recommendation downstream - far worse than making the caller ask.
+        raise SlotUnresolved(
+            "could not work out which draft slot is yours from this draft"
+        )
     return LeagueSettings(**fields)

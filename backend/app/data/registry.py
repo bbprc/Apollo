@@ -35,6 +35,44 @@ NFL_TEAMS = (
     "MIA MIN NE NO NYG NYJ PHI PIT SEA SF TB TEN WAS"
 ).split()
 
+#: Full club names, keyed the way ``normalize_name`` folds them. The consensus
+#: feed calls a defense "Los Angeles Rams", Sleeper sends "LAR", and the
+#: registry stores "LAR Defense"; this is what reconciles the three.
+TEAM_FULL_NAMES: dict[str, str] = {
+    "ARI": "Arizona Cardinals", "ATL": "Atlanta Falcons",
+    "BAL": "Baltimore Ravens", "BUF": "Buffalo Bills",
+    "CAR": "Carolina Panthers", "CHI": "Chicago Bears",
+    "CIN": "Cincinnati Bengals", "CLE": "Cleveland Browns",
+    "DAL": "Dallas Cowboys", "DEN": "Denver Broncos",
+    "DET": "Detroit Lions", "GB": "Green Bay Packers",
+    "HOU": "Houston Texans", "IND": "Indianapolis Colts",
+    "JAX": "Jacksonville Jaguars", "KC": "Kansas City Chiefs",
+    "LAC": "Los Angeles Chargers", "LAR": "Los Angeles Rams",
+    "LV": "Las Vegas Raiders", "MIA": "Miami Dolphins",
+    "MIN": "Minnesota Vikings", "NE": "New England Patriots",
+    "NO": "New Orleans Saints", "NYG": "New York Giants",
+    "NYJ": "New York Jets", "PHI": "Philadelphia Eagles",
+    "PIT": "Pittsburgh Steelers", "SEA": "Seattle Seahawks",
+    "SF": "San Francisco 49ers", "TB": "Tampa Bay Buccaneers",
+    "TEN": "Tennessee Titans", "WAS": "Washington Commanders",
+}
+
+#: Reverse of the above, folded for matching. Built after ``normalize_name``.
+TEAM_ABBREVIATIONS: dict[str, str] = {}
+
+
+def _build_team_aliases() -> None:
+    """Fold every club name, plus its nickname, to a team abbreviation."""
+    for abbrev, full in TEAM_FULL_NAMES.items():
+        TEAM_ABBREVIATIONS[normalize_name(full)] = abbrev
+        TEAM_ABBREVIATIONS[normalize_name(abbrev)] = abbrev
+        # "Rams", "49ers", "Commanders" - the way people actually refer to a D/ST.
+        nickname = full.rsplit(" ", 1)[-1]
+        TEAM_ABBREVIATIONS.setdefault(normalize_name(nickname), abbrev)
+
+
+_build_team_aliases()
+
 
 def _canon_position(raw: str | None) -> str | None:
     if not raw:
@@ -79,6 +117,18 @@ class PlayerRegistry:
 
         for player in players:
             self._by_name.setdefault(player.search_key, []).append(player)
+            if player.position == "DST" and player.team:
+                # Index a defense under every spelling in circulation, so
+                # search and the output-side guardrail recognise "Los Angeles
+                # Rams" and "Rams" as well as "LAR Defense".
+                full = TEAM_FULL_NAMES.get(player.team)
+                aliases = [player.team] + (
+                    [full, full.rsplit(" ", 1)[-1]] if full else []
+                )
+                for alias in aliases:
+                    key = normalize_name(alias)
+                    if key and player not in self._by_name.setdefault(key, []):
+                        self._by_name[key].append(player)
             if player.fantasypros_id:
                 self._by_fp_id[str(player.fantasypros_id)] = player
             if player.sleeper_id:
@@ -116,7 +166,18 @@ class PlayerRegistry:
 
     def resolve(self, name: str, position: str | None = None,
                 team: str | None = None) -> Player | None:
-        """Find a player by name, optionally disambiguated by position/team."""
+        """Find a player by name, optionally disambiguated by position/team.
+
+        Defenses are resolved on team alone: the sources spell them three
+        different ways ("Los Angeles Rams" from the consensus feed, "LAR
+        Defense" here, "LAR" from Sleeper), but they always agree on the team.
+        """
+        if _canon_position(position) == "DST":
+            abbrev = TEAM_ABBREVIATIONS.get(normalize_name(name)) or (
+                team.upper() if team else None
+            )
+            if abbrev:
+                return self.players.get(f"dst:{abbrev}")
         if not name:
             return None
         candidates = self._by_name.get(normalize_name(name), [])
@@ -151,7 +212,18 @@ class PlayerRegistry:
             if key in name and name != key
             for p in group
         ]
-        return (exact + partial)[:limit]
+        # A defense is indexed under several spellings, so the same Player can
+        # surface more than once; keep first-seen order and drop repeats.
+        seen: set[str] = set()
+        results: list[Player] = []
+        for player in exact + partial:
+            if player.player_id in seen:
+                continue
+            seen.add(player.player_id)
+            results.append(player)
+            if len(results) >= limit:
+                break
+        return results
 
     def by_position(self, position: str) -> list[Player]:
         pos = _canon_position(position)
@@ -384,6 +456,9 @@ def build_registry(season: int | None = None) -> PlayerRegistry:
             name=f"{team} Defense",
             position="DST",
             team=team,
+            # Sleeper identifies a defense by its team abbreviation, so this is
+            # what /draft/picks sends and what by_sleeper_id has to match.
+            sleeper_id=team,
         )
 
     registry = PlayerRegistry(list(players.values()), season)

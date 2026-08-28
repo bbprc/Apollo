@@ -56,6 +56,11 @@ class SessionCreate(BaseModel):
     sleeper_user_id: str | None = Field(
         default=None, description="Used to work out which draft slot is yours."
     )
+    my_draft_slot: int | None = Field(
+        default=None,
+        ge=1,
+        description="Your slot, when Sleeper cannot tell us. Never defaulted.",
+    )
 
 
 class SessionResponse(BaseModel):
